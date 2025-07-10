@@ -1,5 +1,5 @@
 // src/context/AuthContext.jsx
-import React, { createContext, useState, useEffect, useContext } from 'react';
+
 import axios from 'axios'; // For API calls
 
 const AuthContext = createContext();
