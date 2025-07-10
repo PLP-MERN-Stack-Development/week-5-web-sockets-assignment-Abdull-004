@@ -1,132 +1,146 @@
-// server.js - Main server file for Socket.io chat application
-
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
+const socketIo = require('socket.io');
+const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
-const path = require('path');
+const connectDB = require('./config/db');
+const authRoutes = require('./routes/authRoutes');
+const messageRoutes = require('./routes/messageRoutes');
+const Message = require('./models/Message');
+const jwt = require('jsonwebtoken');
 
-// Load environment variables
-dotenv.config();
-
-// Initialize Express app
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
+
+const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
+    origin: process.env.FRONTEND_URL || '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
+  }
 });
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+connectDB();
 
-// Store connected users and messages
-const users = {};
-const messages = [];
+app.use(cors({
+  origin: process.env.FRONTEND_URL || '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+}));
+app.use(express.json());
+
+app.use('/api/auth', authRoutes);
+app.use('/api/messages', messageRoutes);
+
+// --- Socket.IO Authentication Middleware ---
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) {
+    return next(new Error('Authentication error: No token provided.'));
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    socket.user = decoded.user; // Attach user payload to socket object
+    next();
+  } catch (err) {
+    next(new Error('Authentication error: Invalid token.'));
+  }
+});
+
+// Store active typing users (userId -> username)
 const typingUsers = {};
 
-// Socket.io connection handler
+// --- Socket.IO Event Handling ---
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
+  console.log(`User connected to Socket.IO: ${socket.id} (User ID: ${socket.user.id})`);
 
-  // Handle user joining
-  socket.on('user_join', (username) => {
-    users[socket.id] = { username, id: socket.id };
-    io.emit('user_list', Object.values(users));
-    io.emit('user_joined', { username, id: socket.id });
-    console.log(`${username} joined the chat`);
-  });
+  // Listen for 'sendMessage' event from clients
+  socket.on('sendMessage', async (data) => {
+    try {
+      const newMessage = new Message({
+        sender: socket.user.username, // Always use authenticated username
+        senderId: socket.user.id,
+        text: data.text,
+        timestamp: new Date(),
+        replyTo: data.replyTo || null // NEW: Save replyTo message ID if provided
+      });
 
-  // Handle chat messages
-  socket.on('send_message', (messageData) => {
-    const message = {
-      ...messageData,
-      id: Date.now(),
-      sender: users[socket.id]?.username || 'Anonymous',
-      senderId: socket.id,
-      timestamp: new Date().toISOString(),
-    };
-    
-    messages.push(message);
-    
-    // Limit stored messages to prevent memory issues
-    if (messages.length > 100) {
-      messages.shift();
-    }
-    
-    io.emit('receive_message', message);
-  });
+      await newMessage.save();
 
-  // Handle typing indicator
-  socket.on('typing', (isTyping) => {
-    if (users[socket.id]) {
-      const username = users[socket.id].username;
-      
-      if (isTyping) {
-        typingUsers[socket.id] = username;
-      } else {
-        delete typingUsers[socket.id];
+      // Populate the replyTo field before emitting, so frontend gets reply details
+      const populatedMessage = await Message.findById(newMessage._id)
+        .populate('replyTo', 'sender text timestamp'); // Get sender, text, timestamp of replied message
+
+      io.emit('receiveMessage', populatedMessage); // Emit the populated message
+
+      // Stop typing for this user after message is sent
+      if (typingUsers[socket.user.id]) {
+        delete typingUsers[socket.user.id];
+        socket.broadcast.emit('userStopTyping', { userId: socket.user.id });
       }
-      
-      io.emit('typing_users', Object.values(typingUsers));
+
+    } catch (error) {
+      console.error('Error saving message or emitting:', error);
+      socket.emit('messageError', { message: 'Failed to send message', error: error.message });
     }
   });
 
-  // Handle private messages
-  socket.on('private_message', ({ to, message }) => {
-    const messageData = {
-      id: Date.now(),
-      sender: users[socket.id]?.username || 'Anonymous',
-      senderId: socket.id,
-      message,
-      timestamp: new Date().toISOString(),
-      isPrivate: true,
-    };
-    
-    socket.to(to).emit('private_message', messageData);
-    socket.emit('private_message', messageData);
+  // NEW: Listen for 'typing' event
+  socket.on('typing', () => {
+    if (!typingUsers[socket.user.id]) {
+      typingUsers[socket.user.id] = socket.user.username;
+      // Broadcast to all other clients that this user is typing
+      socket.broadcast.emit('userTyping', { userId: socket.user.id, username: socket.user.username });
+    }
   });
 
-  // Handle disconnection
+  // NEW: Listen for 'stopTyping' event
+  socket.on('stopTyping', () => {
+    if (typingUsers[socket.user.id]) {
+      delete typingUsers[socket.user.id];
+      // Broadcast to all other clients that this user stopped typing
+      socket.broadcast.emit('userStopTyping', { userId: socket.user.id });
+    }
+  });
+
+  // NEW: Listen for 'deleteMessage' event (from dashboard/admin actions)
+  socket.on('deleteMessage', async (messageId) => {
+    try {
+      const message = await Message.findById(messageId);
+
+      if (!message) {
+        socket.emit('messageError', { message: 'Message not found for deletion.' });
+        return;
+      }
+
+      // Authorization check: Only sender or admin (if you implement roles) can delete
+      if (message.senderId.toString() !== socket.user.id) {
+        socket.emit('messageError', { message: 'Not authorized to delete this message.' });
+        return;
+      }
+
+      await message.deleteOne();
+      io.emit('messageDeleted', { messageId: messageId }); // Notify all clients
+    } catch (error) {
+      console.error('Error deleting message via socket:', error);
+      socket.emit('messageError', { message: 'Failed to delete message.', error: error.message });
+    }
+  });
+
+
+  // Listen for client disconnections
   socket.on('disconnect', () => {
-    if (users[socket.id]) {
-      const { username } = users[socket.id];
-      io.emit('user_left', { username, id: socket.id });
-      console.log(`${username} left the chat`);
+    console.log(`User disconnected from Socket.IO: ${socket.id} (User ID: ${socket.user ? socket.user.id : 'N/A'})`);
+    // Remove user from typing list if they disconnect
+    if (typingUsers[socket.user.id]) {
+      delete typingUsers[socket.user.id];
+      socket.broadcast.emit('userStopTyping', { userId: socket.user.id });
     }
-    
-    delete users[socket.id];
-    delete typingUsers[socket.id];
-    
-    io.emit('user_list', Object.values(users));
-    io.emit('typing_users', Object.values(typingUsers));
   });
 });
 
-// API routes
-app.get('/api/messages', (req, res) => {
-  res.json(messages);
-});
-
-app.get('/api/users', (req, res) => {
-  res.json(Object.values(users));
-});
-
-// Root route
-app.get('/', (req, res) => {
-  res.send('Socket.io Chat Server is running');
-});
-
-// Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
-
-module.exports = { app, server, io }; 
