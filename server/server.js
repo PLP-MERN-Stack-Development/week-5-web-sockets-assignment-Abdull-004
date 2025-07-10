@@ -23,6 +23,8 @@ const io = socketIo(server, {
 
 connectDB();
 
+console.log('MONGODB_URI being used:', process.env.MONGODB_URI);
+
 app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
