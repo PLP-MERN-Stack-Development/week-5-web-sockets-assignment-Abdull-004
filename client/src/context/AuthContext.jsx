@@ -1,5 +1,6 @@
 // src/context/AuthContext.jsx
 
+import React, { createContext, useState, useEffect, useContext } from 'react';
 import axios from 'axios'; // For API calls
 
 const AuthContext = createContext();
@@ -10,7 +11,7 @@ export const AuthProvider = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true); // To indicate initial loading/token check
 
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = import.meta.env.VITE_API_URL;
 
   // Check for token in localStorage on app load
   useEffect(() => {

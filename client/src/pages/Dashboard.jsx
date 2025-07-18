@@ -1,11 +1,12 @@
 // src/pages/Dashboard.jsx
 
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import DeleteConfirmationModal from '../components/DeleteConfirmationModal'; // Import the modal
 
-const backendUrl = import.meta.env.VITE_BACKEND_URL;
+const backendUrl = import.meta.env.VITE_API_URL;
 
 function Dashboard() {
   const { user, isAuthenticated, loading, logout } = useAuth();
@@ -31,7 +32,7 @@ function Dashboard() {
     setLoadingMessages(true);
     setError(null);
     try {
-      const response = await axios.get(`${backendUrl}/api/messages`, {
+      const response = await axios.get(`${backendUrl}/messages`, {
         headers: {
           Authorization: `Bearer ${localStorage.getItem('token')}`,
         },
@@ -66,7 +67,7 @@ function Dashboard() {
     if (!messageToDelete) return;
 
     try {
-      await axios.delete(`${backendUrl}/api/messages/${messageToDelete._id}`, {
+      await axios.delete(`${backendUrl}/messages/${messageToDelete._id}`, {
         headers: {
           Authorization: `Bearer ${localStorage.getItem('token')}`,
         },
